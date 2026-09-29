@@ -1,0 +1,40 @@
+{
+  "name": "bun-worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Run server code in Bun workers across Vite builds, Nitro, and bun-single-compile executables.",
+  "type": "module",
+  "exports": {
+    "./vite": "./src/vite-plugin.ts",
+    "./client": "./src/client.ts",
+    "./host": "./src/host.ts",
+    "./protocol": "./src/protocol.ts",
+    "./transfer": "./src/transfer.ts",
+    "./env": "./src/env.d.ts",
+    "./file-asset": "./src/file-asset.ts"
+  },
+  "scripts": {
+    "test:ai": "AGENT=1 bun test --parallel=6 --pass-with-no-tests",
+    "typecheck": "tsc --noEmit --pretty false",
+    "lint": "oxlint --format=agent --quiet",
+    "format": "oxfmt"
+  },
+  "peerDependencies": {
+    "nitro": ">=3.0.0-0",
+    "vite": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "nitro": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "nitro": "3.0.260903-beta",
+    "oxfmt": "^0.70.0",
+    "oxlint": "^1.85.0",
+    "oxlint-tsgolint": "^7.0.2002",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1"
+  }
+}

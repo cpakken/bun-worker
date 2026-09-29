@@ -44,7 +44,18 @@ import { transfer } from 'bun-worker'
 await parser.parse(transfer(bytes, [bytes.buffer]))
 ```
 
-Worker code runs as plain Bun, not through Vite. It can use `?raw` imports and `with { type: 'file' }` imports, but not other Vite features.
+## Worker code is Bun code
+
+The calling code goes through Vite; the worker module and everything it imports run as plain Bun in every environment, including the dev server. Use Bun's native equivalents of Vite features:
+
+| Need | Vite | In a worker |
+| --- | --- | --- |
+| Path aliases | `resolve.alias` | tsconfig `paths` |
+| Environment variables | `import.meta.env` | `process.env` or `Bun.env` |
+| File contents as a string | `?raw` | `import text from './file.svg' with { type: 'text' }` |
+| File path (fonts, WASM) | `?url` | `import path from 'pkg/file.wasm' with { type: 'file' }`, read with `readFileAsset` |
+
+Other plugins' transforms and `import.meta.glob` aren't available. TypeScript types an import by its path, not its `with` attribute, so a text import of a file type TypeScript doesn't know needs a declaration such as `declare module '*.svg' { const content: string; export default content }`. Projects that include `vite/client` types already have one for `.svg`.
 
 ## File assets
 

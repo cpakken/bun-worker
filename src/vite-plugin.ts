@@ -8,14 +8,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { restartWorkers } from './client.ts'
 import { bundleNitroBunWorkers } from './nitro.ts'
-import { rawImportsPlugin } from './raw-imports.ts'
 
 const workerQuery = '?bun-worker'
 const resolvedWorkerPrefix = '\0bun-worker:'
 const libraryFile = (file: string) => fileURLToPath(new URL(file, import.meta.url))
 const clientFile = libraryFile('./client.ts')
 const hostFile = libraryFile('./host.ts')
-const devPreloadFile = libraryFile('./dev-preload.ts')
 
 type EmittedWorker = {
   name: string
@@ -109,7 +107,7 @@ serve(() => import(${JSON.stringify(moduleFile)}))
       if (this.environment.mode === 'dev') {
         return clientModule(
           name,
-          `new Worker(${JSON.stringify(entryFile)}, { name: ${JSON.stringify(name)}, preload: [${JSON.stringify(devPreloadFile)}] })`
+          `new Worker(${JSON.stringify(entryFile)}, { name: ${JSON.stringify(name)} })`
         )
       }
 
@@ -175,7 +173,6 @@ async function buildWorker(entry: string): Promise<Uint8Array> {
     target: 'bun',
     packages: 'external',
     minify: true,
-    plugins: [rawImportsPlugin()],
     define: {
       'import.meta.env.DEV': 'false',
       'process.env.NODE_ENV': JSON.stringify('production'),

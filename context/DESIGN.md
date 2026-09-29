@@ -10,6 +10,8 @@ An app wants to call a function on another thread. A worker is therefore a plain
 
 The earlier design exposed that plumbing (client, host, protocol, transfer, and env entries) and ran worker code in process on the dev server. Each app then needed a dispatcher that branched on `BUN_WORKER_BUILD`, a dev-only font path, and Vite externals for the assets the in-process path pulled into the SSR bundle. That branching is where the copies drifted. Worker code has to run as plain Bun anyway, because builds bundle it with `Bun.build` rather than Vite, so the dev server now runs it in a real worker too, and each of those pieces disappears.
 
+Worker code is therefore pure Bun, with no exceptions: the calling code goes through Vite, and the worker graph uses Bun's native equivalents (tsconfig paths, `process.env`, `with { type: 'text' }`, `with { type: 'file' }`). The library once supported `?raw` in workers through a Bun plugin loaded in builds and preloaded into dev workers; it was the only Vite feature any worker used, and Bun's text import replaces it, so the plugin and the preload are gone.
+
 Vite 8 does not pass import attributes to plugin hooks (checked: `resolveId` receives none in builds and `{}` in dev). So `import * as pdf from './pdf.worker.ts' with { type: 'bun-worker' }`, which would type the proxy for free, can't work. The `?bun-worker` query stays, and the caller names the module type once.
 
 ## Behavior
@@ -36,7 +38,7 @@ A `with { type: 'file' }` import resolves to a different path in each environmen
 
 | Environment | Worker | File import |
 | --- | --- | --- |
-| Vite dev server | runs the source directly, with a preload for `?raw` imports | absolute path from node_modules |
+| Vite dev server | runs the source directly | absolute path from node_modules |
 | `vite build` (any mode) | built by `Bun.build` with packages external; listed in `bun-workers.json` | absolute path from node_modules |
 | Nitro Bun preset | the Nitro hook rebundles manifest workers with packages bundled into `_ssr/` | relative to the module; `readFileAsset` resolves it |
 | bun-single-compile | manifest workers staged as root-level entrypoints | absolute embedded path (`/$bunfs/…`, `B:/~BUN/…`) |
@@ -47,8 +49,19 @@ Nitro flattens SSR chunks into `_ssr/`, and the hook writes workers there. A wor
 
 `Bun.build` does not implement `with { type: 'bytes' }` (checked on 1.4.2): it returns the path string, so it can't replace `readFileAsset`.
 
+## Considered alternatives
+
+**Vite's own workers** (`?worker` and `new Worker(new URL(...))`) are browser workers, not server workers. The dev server serves them over HTTP, which Bun can't load as a worker. Builds bundle them through Vite's browser-targeted `worker` pipeline: server builds emit no worker file and point at a public `/assets/...` URL by default, top-level await needs `worker.format: 'es'`, and `node:` builtins become empty browser stubs. The `new URL(...)` form isn't processed in server builds at all.
+
+**A Vite Environment API version** would run worker code through Vite, as a server counterpart of Vite's worker pipeline. A Vite module runner inside a Bun worker, connected to a custom environment over a `MessagePort`, works on Vite 8: a Vite alias and `import.meta.env` resolved in the worker. It was not adopted, for three reasons:
+- Vite ignores Bun's `with { type: 'file' }`, and Rolldown drops import attributes from external imports with no option to keep them. File imports would need text-patching of the output, or assets inlined with `?inline`.
+- Workers would have to be built by Vite before TanStack Start's server build and Nitro's compile hook.
+- Parts of the API are experimental.
+
+Bun natively covers what server code usually wants from Vite, so the benefit, Vite features inside workers, didn't justify those costs. Revisit if workers need other plugins' transforms. In that case, find workers by convention (`*.worker.ts`) so they can be built first, and consider bundling every dependency into each worker so Nitro and compile only copy the file.
+
 ## Tests
 
-The integration tests write a small app with a worker that uses a packaged file import and a `?raw` import, the same asset kinds the apps' PDF workers use. The tests check a production build, a development build, a compiled executable, a Nitro artifact run outside the repository, and the dev server, including a restart after a source change. Build fixtures live under `node_modules/.cache` so they resolve the library's own Vite and Nitro. Vite's watcher ignores `node_modules`, so the dev test uses the system temp directory and imports Vite by absolute path.
+The integration tests write a small app with a worker that uses a packaged file import and a text import, the same asset kinds the apps' PDF workers use. The tests check a production build, a development build, a compiled executable, a Nitro artifact run outside the repository, and the dev server, including a restart after a source change. Build fixtures live under `node_modules/.cache` so they resolve the library's own Vite and Nitro. Vite's watcher ignores `node_modules`, so the dev test uses the system temp directory and imports Vite by absolute path.
 
 The runtime tests run real workers. Bun 1.4.2's `expect(promise).rejects` never settles when a worker message settles the promise, so they check rejections through `.then`.

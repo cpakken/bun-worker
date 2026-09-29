@@ -1,14 +1,7 @@
-export type BunWorkerRequest<TJob> = {
-  id: number
-  job: TJob
-}
+export type WorkerCall = { id: number; method: string; args: unknown[] }
 
-export type BunWorkerResponse<TResult> =
-  | { status: 'ready' }
-  | { id: number; status: 'success'; result: TResult }
-  | { id: number; status: 'error'; message: string; name: string }
+export type SerializedError = { name: string; message: string; stack?: string }
 
-export type PreparedWorkerValue<TValue> = {
-  value: TValue
-  transfer: Transferable[]
-}
+export type WorkerReply =
+  | { id: number; ok: true; value: unknown }
+  | { id: number; ok: false; error: SerializedError }

@@ -1,11 +1,8 @@
-// Reference from the app, e.g. `/// <reference types="bun-worker/env" />`.
-
-interface ImportMetaEnv {
-  /** True in `vite build` output, including NODE_ENV=development builds; false on the dev server. */
-  readonly BUN_WORKER_BUILD: boolean
-}
+// Types for `?bun-worker` imports. The plugin and main entries reference this file, so apps get it
+// by importing either one from a file their tsconfig includes.
 
 declare module '*?bun-worker' {
-  const createWorker: (options?: WorkerOptions) => Worker
-  export default createWorker
+  /** Returns the worker's exported functions: `worker<typeof import('./module.ts')>()`. */
+  const worker: <Module>() => import('./types').WorkerModule<Module>
+  export default worker
 }

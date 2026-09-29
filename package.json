@@ -5,13 +5,8 @@
   "description": "Run server code in Bun workers across Vite builds, Nitro, and bun-single-compile executables.",
   "type": "module",
   "exports": {
-    "./vite": "./src/vite-plugin.ts",
-    "./client": "./src/client.ts",
-    "./host": "./src/host.ts",
-    "./protocol": "./src/protocol.ts",
-    "./transfer": "./src/transfer.ts",
-    "./env": "./src/env.d.ts",
-    "./file-asset": "./src/file-asset.ts"
+    ".": "./src/index.ts",
+    "./vite": "./src/vite-plugin.ts"
   },
   "scripts": {
     "test:ai": "AGENT=1 bun test --parallel=6 --pass-with-no-tests",

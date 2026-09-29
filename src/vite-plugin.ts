@@ -1,10 +1,21 @@
+// Ambient types for `?bun-worker` imports can only ship through a reference.
+// oxlint-disable-next-line typescript/triple-slash-reference
+/// <reference path="./env.d.ts" />
 import type { NitroModule } from 'nitro/types'
 import type { Plugin } from 'vite'
+import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { restartWorkers } from './client.ts'
 import { bundleNitroBunWorkers } from './nitro.ts'
+import { rawImportsPlugin } from './raw-imports.ts'
 
 const workerQuery = '?bun-worker'
 const resolvedWorkerPrefix = '\0bun-worker:'
+const libraryFile = (file: string) => fileURLToPath(new URL(file, import.meta.url))
+const clientFile = libraryFile('./client.ts')
+const hostFile = libraryFile('./host.ts')
+const devPreloadFile = libraryFile('./dev-preload.ts')
 
 type EmittedWorker = {
   name: string
@@ -12,14 +23,31 @@ type EmittedWorker = {
 }
 
 /**
- * Turns `./worker.ts?bun-worker` imports into factories for isolated Bun workers.
- * Server builds also emit `bun-workers.json` so standalone compilers can
- * register the generated files as worker entrypoints.
+ * Runs `./module.ts?bun-worker` imports in a Bun worker: the dev server starts one from source,
+ * and server builds bundle it as an asset. Builds also emit `bun-workers.json` so standalone
+ * compilers can register the generated files as worker entrypoints.
  */
 export function bunWorkerPlugin(): Plugin & { nitro: NitroModule } {
   const emittedWorkers = new Map<string, EmittedWorker>()
   const workerBuilds = new Map<string, Promise<EmittedWorker>>()
   const workerNameOwners = new Map<string, string>()
+  let entryDirectory = ''
+
+  async function writeWorkerEntry(name: string, moduleFile: string) {
+    // Unique per module: builds that share a Vite cache directory must not overwrite each other.
+    const entryFile = path.join(entryDirectory, `${name}-${Bun.hash(moduleFile).toString(36)}.worker.ts`)
+    const source = `import { serve } from ${JSON.stringify(hostFile)}
+serve(() => import(${JSON.stringify(moduleFile)}))
+`
+    const current = await Bun.file(entryFile)
+      .text()
+      .catch(() => undefined)
+    if (current !== source) {
+      await mkdir(entryDirectory, { recursive: true })
+      await Bun.write(entryFile, source)
+    }
+    return entryFile
+  }
 
   return {
     name: 'bun-worker',
@@ -32,12 +60,17 @@ export function bunWorkerPlugin(): Plugin & { nitro: NitroModule } {
         })
       },
     },
-    config(_config, { command }) {
-      // NODE_ENV=development builds still need emitted workers, not Vite's module runner.
-      return { define: { 'import.meta.env.BUN_WORKER_BUILD': command === 'build' } }
+    configResolved(config) {
+      entryDirectory = path.join(config.cacheDir, 'bun-worker')
     },
     configEnvironment(name) {
       if (name === 'ssr') return { build: { emitAssets: true } }
+    },
+    configureServer(server) {
+      // Worker code runs outside Vite's module graph, so any source change restarts the workers.
+      server.watcher.on('all', (_event, file) => {
+        if (!file.includes(`${path.sep}node_modules${path.sep}`)) restartWorkers()
+      })
     },
     buildStart() {
       if (this.environment.name !== 'ssr' || this.environment.mode !== 'build') return
@@ -48,69 +81,60 @@ export function bunWorkerPlugin(): Plugin & { nitro: NitroModule } {
     async resolveId(source, importer) {
       if (!source.endsWith(workerQuery)) return
 
-      const workerSource = source.slice(0, -workerQuery.length)
-      const resolved = await this.resolve(workerSource, importer, { skipSelf: true })
-      if (!resolved) this.error(`Could not resolve Bun worker: ${workerSource}`)
+      const moduleSource = source.slice(0, -workerQuery.length)
+      const resolved = await this.resolve(moduleSource, importer, { skipSelf: true })
+      if (!resolved) this.error(`Could not resolve Bun worker module: ${moduleSource}`)
 
       return `${resolvedWorkerPrefix}${resolved.id}`
     },
     async load(id) {
       if (!id.startsWith(resolvedWorkerPrefix)) return
 
-      const workerEntry = id.slice(resolvedWorkerPrefix.length)
-      if (this.environment.name !== 'ssr' || this.environment.mode === 'dev') {
-        const message = `Bun worker ${workerEntry} is only emitted for server builds.`
-        return `export default function createWorker() {
+      const moduleFile = id.slice(resolvedWorkerPrefix.length)
+      if (this.environment.name !== 'ssr') {
+        const message = `Bun worker ${moduleFile} can only run in server code.`
+        return `export default function worker() {
   throw new Error(${JSON.stringify(message)})
 }`
       }
 
-      let emittedWorker = emittedWorkers.get(workerEntry)
-      if (!emittedWorker) {
-        const workerName = toWorkerName(workerEntry)
-        const existingOwner = workerNameOwners.get(workerName)
-        if (existingOwner && existingOwner !== workerEntry) {
-          this.error(
-            `Bun worker name ${workerName} is shared by ${existingOwner} and ${workerEntry}.`
-          )
-        }
-        workerNameOwners.set(workerName, workerEntry)
+      const name = toWorkerName(moduleFile)
+      const existingOwner = workerNameOwners.get(name)
+      if (existingOwner && existingOwner !== moduleFile) {
+        this.error(`Bun worker name ${name} is shared by ${existingOwner} and ${moduleFile}.`)
+      }
+      workerNameOwners.set(name, moduleFile)
+      const entryFile = await writeWorkerEntry(name, moduleFile)
 
-        let workerBuild = workerBuilds.get(workerEntry)
-        if (!workerBuild) {
-          workerBuild = (async () => {
-            const workerSource = await buildWorker(workerEntry)
-            return {
-              name: workerName,
-              referenceId: this.emitFile({
-                type: 'asset',
-                name: `${workerName}.worker.js`,
-                source: workerSource,
-              }),
-            }
-          })()
-          workerBuilds.set(workerEntry, workerBuild)
-        }
-
-        emittedWorker = await workerBuild
-        emittedWorkers.set(workerEntry, emittedWorker)
+      if (this.environment.mode === 'dev') {
+        return clientModule(
+          name,
+          `new Worker(${JSON.stringify(entryFile)}, { name: ${JSON.stringify(name)}, preload: [${JSON.stringify(devPreloadFile)}] })`
+        )
       }
 
-      return `export default function createWorker(options) {
-  const workerSpecifier = import.meta.ROLLUP_FILE_URL_${emittedWorker.referenceId}
-  if (process.env.BUN_SINGLE_COMPILE_DEBUG === "1") {
-    console.error("[bun-worker debug]", JSON.stringify({
-      name: ${JSON.stringify(emittedWorker.name)},
-      specifier: workerSpecifier,
-      importMetaUrl: import.meta.url,
-      importMetaDir: import.meta.dir,
-      bunVersion: Bun.version,
-      bunRevision: Bun.revision,
-      cwd: process.cwd(),
-    }, null, 2))
-  }
-  return new Worker(workerSpecifier, options)
-}`
+      let emittedWorker = emittedWorkers.get(moduleFile)
+      if (!emittedWorker) {
+        let workerBuild = workerBuilds.get(moduleFile)
+        if (!workerBuild) {
+          workerBuild = (async () => ({
+            name,
+            referenceId: this.emitFile({
+              type: 'asset',
+              name: `${name}.worker.js`,
+              source: await buildWorker(entryFile),
+            }),
+          }))()
+          workerBuilds.set(moduleFile, workerBuild)
+        }
+        emittedWorker = await workerBuild
+        emittedWorkers.set(moduleFile, emittedWorker)
+      }
+
+      return clientModule(
+        name,
+        `new Worker(import.meta.ROLLUP_FILE_URL_${emittedWorker.referenceId}, { name: ${JSON.stringify(name)} })`
+      )
     },
     resolveFileUrl({ referenceId, relativePath }) {
       const isWorker = Array.from(emittedWorkers.values()).some(
@@ -139,6 +163,12 @@ export function bunWorkerPlugin(): Plugin & { nitro: NitroModule } {
   }
 }
 
+function clientModule(name: string, createWorker: string) {
+  return `import { workerModule } from ${JSON.stringify(clientFile)}
+export default workerModule(${JSON.stringify(name)}, () => ${createWorker})
+`
+}
+
 async function buildWorker(entry: string): Promise<Uint8Array> {
   const result = await Bun.build({
     entrypoints: [entry],
@@ -157,15 +187,20 @@ async function buildWorker(entry: string): Promise<Uint8Array> {
     )
   }
 
-  const workerOutput = result.outputs.find((output) => output.kind === 'entry-point')
-  if (!workerOutput) throw new Error(`Bun worker build did not produce an entrypoint: ${entry}`)
+  const outputs = result.outputs.filter((output) => output.kind !== 'sourcemap')
+  const workerOutput = outputs.find((output) => output.kind === 'entry-point')
+  if (!workerOutput || outputs.length !== 1) {
+    throw new Error(
+      `Bun worker build must produce a single file: ${entry} produced ${outputs.map((output) => output.path).join(', ')}`
+    )
+  }
 
   return new Uint8Array(await workerOutput.arrayBuffer())
 }
 
-function toWorkerName(entry: string): string {
+function toWorkerName(moduleFile: string): string {
   const baseName = path
-    .basename(entry)
+    .basename(moduleFile)
     .replace(/\.[^.]+$/, '')
     .replace(/\.worker$/, '')
   const name = baseName
@@ -174,22 +209,6 @@ function toWorkerName(entry: string): string {
     .replace(/^-+|-+$/g, '')
     .toLowerCase()
 
-  if (!name) throw new Error(`Could not derive a name for Bun worker: ${entry}`)
+  if (!name) throw new Error(`Could not derive a name for Bun worker: ${moduleFile}`)
   return name
-}
-
-function rawImportsPlugin(): Bun.BunPlugin {
-  return {
-    name: 'vite-raw-imports',
-    setup(builder) {
-      builder.onResolve({ filter: /\?raw$/ }, (args) => ({
-        path: path.resolve(args.resolveDir, args.path.slice(0, -'?raw'.length)),
-        namespace: 'raw',
-      }))
-      builder.onLoad({ filter: /.*/, namespace: 'raw' }, async (args) => ({
-        contents: `export default ${JSON.stringify(await Bun.file(args.path).text())}`,
-        loader: 'js',
-      }))
-    },
-  }
 }

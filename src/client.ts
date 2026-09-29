@@ -1,94 +1,130 @@
-import type { BunWorkerRequest, BunWorkerResponse, PreparedWorkerValue } from './protocol'
+import type { SerializedError, WorkerCall, WorkerReply } from './protocol'
+import { argumentTransfers } from './transfer'
 
-type PendingResult<TResult> = {
-  resolve: (result: TResult) => void
-  reject: (error: Error) => void
+/** Bun's Worker can stop holding the process open while idle. */
+type BunWorker = Worker & { ref(): void; unref(): void }
+
+type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void }
+
+type WorkerClient = {
+  proxy: object
+  /** Replaces the worker once no calls are pending, so the next call loads fresh code. */
+  restart: () => void
 }
 
-type BunWorkerClientOptions<TJob> = {
-  createWorker: () => Worker
-  stoppedMessage: string
-  prepareJob?: (job: TJob) => PreparedWorkerValue<TJob>
+// One client per worker module for the whole process. Vite's dev server reloads the generated
+// module on every change and the plugin runs in a separate module instance, so both look clients
+// up here rather than holding their own.
+const clientsKey: unique symbol = Symbol.for('bun-worker.clients')
+const processState = globalThis as { [clientsKey]?: Map<string, WorkerClient> }
+const clients = (processState[clientsKey] ??= new Map())
+
+/** Called by generated `?bun-worker` modules; returns the call proxy for the named worker. */
+export function workerModule(name: string, createWorker: () => Worker) {
+  let client = clients.get(name)
+  if (!client) clients.set(name, (client = createClient(name, createWorker)))
+  const proxy = client.proxy
+  return () => proxy
 }
 
-/** Creates one lazy worker and correlates typed jobs with their eventual results. */
-export function createBunWorkerClient<TJob, TResult>({
-  createWorker,
-  stoppedMessage,
-  prepareJob,
-}: BunWorkerClientOptions<TJob>) {
-  let worker: Worker | undefined
-  let workerReady = false
-  let nextRequestId = 1
-  const pendingResults = new Map<number, PendingResult<TResult>>()
-  const queuedRequests: BunWorkerRequest<TJob>[] = []
+/** Restarts every worker; the dev server calls this when source files change. */
+export function restartWorkers() {
+  for (const client of clients.values()) client.restart()
+}
 
-  return function runInWorker(job: TJob): Promise<TResult> {
-    const activeWorker = getWorker()
-    const request = { id: nextRequestId++, job }
+function createClient(name: string, createWorker: () => Worker): WorkerClient {
+  let worker: BunWorker | undefined
+  let restartPending = false
+  let nextId = 1
+  const pending = new Map<number, Pending>()
 
+  function call(method: string, args: unknown[]) {
+    const target = worker ?? startWorker()
+    const id = nextId++
     return new Promise((resolve, reject) => {
-      pendingResults.set(request.id, { resolve, reject })
-      if (workerReady) sendRequest(activeWorker, request)
-      else queuedRequests.push(request)
+      pending.set(id, { resolve, reject })
+      target.ref()
+      try {
+        target.postMessage({ id, method, args } satisfies WorkerCall, argumentTransfers(args))
+      } catch (error) {
+        pending.delete(id)
+        releaseIfIdle()
+        reject(error)
+      }
     })
   }
 
-  function getWorker() {
-    if (worker) return worker
-
-    const newWorker = createWorker()
-    worker = newWorker
-    newWorker.onmessage = (event: MessageEvent<BunWorkerResponse<TResult>>) =>
-      handleWorkerMessage(newWorker, event.data)
-    newWorker.onerror = (event) => handleWorkerError(newWorker, event)
-    return newWorker
-  }
-
-  function handleWorkerMessage(source: Worker, response: BunWorkerResponse<TResult>) {
-    if (source !== worker) return
-
-    if (response.status === 'ready') {
-      workerReady = true
-      for (const request of queuedRequests) sendRequest(source, request)
-      queuedRequests.length = 0
-      return
+  function startWorker() {
+    const started = createWorker() as BunWorker
+    worker = started
+    // Keep the process alive only while calls are pending.
+    started.unref()
+    started.onmessage = (event: MessageEvent<WorkerReply>) => {
+      if (started === worker) settle(event.data)
     }
-
-    const pending = pendingResults.get(response.id)
-    if (!pending) return
-
-    pendingResults.delete(response.id)
-    if (response.status === 'success') pending.resolve(response.result)
-    else pending.reject(Object.assign(new Error(response.message), { name: response.name }))
+    started.onerror = (event) => {
+      if (started !== worker) return
+      event.preventDefault()
+      fail(new Error(event.message || `The Bun worker "${name}" stopped unexpectedly.`))
+    }
+    started.addEventListener('close', () => {
+      if (started === worker) fail(new Error(`The Bun worker "${name}" exited unexpectedly.`))
+    })
+    return started
   }
 
-  function handleWorkerError(source: Worker, event: ErrorEvent) {
-    if (source !== worker) return
+  function settle(reply: WorkerReply) {
+    const request = pending.get(reply.id)
+    if (!request) return
+    pending.delete(reply.id)
+    releaseIfIdle()
+    if (reply.ok) request.resolve(reply.value)
+    else request.reject(toError(reply.error))
+  }
 
-    const error = new Error(event.message || stoppedMessage)
-    for (const pending of pendingResults.values()) pending.reject(error)
-    pendingResults.clear()
-    queuedRequests.length = 0
-    workerReady = false
+  function fail(error: Error) {
+    stopWorker()
+    for (const request of pending.values()) request.reject(error)
+    pending.clear()
+  }
+
+  function releaseIfIdle() {
+    if (pending.size > 0) return
+    worker?.unref()
+    if (restartPending) stopWorker()
+  }
+
+  function stopWorker() {
+    const stopping = worker
     worker = undefined
+    restartPending = false
+    stopping?.terminate()
   }
 
-  function sendRequest(target: Worker, request: BunWorkerRequest<TJob>) {
-    try {
-      const prepared = prepareJob?.(request.job)
-      if (!prepared) {
-        target.postMessage(request)
-        return
-      }
-
-      target.postMessage({ ...request, job: prepared.value }, prepared.transfer)
-    } catch (error) {
-      const pending = pendingResults.get(request.id)
-      if (!pending) return
-
-      pendingResults.delete(request.id)
-      pending.reject(error instanceof Error ? error : new Error(String(error)))
+  const proxy = new Proxy(
+    {},
+    {
+      get(_, method) {
+        // `then` stays undefined so the proxy isn't mistaken for a promise.
+        if (typeof method !== 'string' || method === 'then') return undefined
+        return (...args: unknown[]) => call(method, args)
+      },
     }
+  )
+
+  return {
+    proxy,
+    restart() {
+      if (!worker) return
+      restartPending = true
+      releaseIfIdle()
+    },
   }
+}
+
+function toError({ name, message, stack }: SerializedError) {
+  const error = new Error(message)
+  error.name = name
+  if (stack) error.stack = stack
+  return error
 }

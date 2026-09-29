@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { createWorkerApp, expectedEcho, librarySource } from '@test/worker-app'
+import { createWorkerApp, expectedEcho, librarySource, runScript, viteModule } from '@test/worker-app'
 
 test.each(['production', 'development'])(
   'runs workers from a %s build and a standalone executable',
@@ -27,17 +27,9 @@ await build({
   },
 })`
       )
-      const build = Bun.spawn([process.execPath, buildFile], {
-        env: { ...process.env, NODE_ENV: nodeEnv },
-        stdout: 'ignore',
-        stderr: 'pipe',
-      })
-      const [buildExit, buildErrors] = await Promise.all([
-        build.exited,
-        new Response(build.stderr).text(),
-      ])
-      expect(buildErrors).toBe('')
-      expect(buildExit).toBe(0)
+      const build = await runScript(buildFile, { env: { NODE_ENV: nodeEnv } })
+      expect(build.stderr).toBe('')
+      expect(build.exitCode).toBe(0)
       const manifest = JSON.parse(
         await readFile(path.join(outputDirectory, 'bun-workers.json'), 'utf8')
       ) as { version: number; workers: Record<string, string> }
@@ -45,24 +37,18 @@ await build({
       expect(manifest.version).toBe(1)
       expect(workerFile).toMatch(/^assets\/echo\.worker-[\w-]+\.js$/)
 
+      // No process.exit: an idle worker must not keep the process alive.
       const entryFile = path.join(directory, 'entry.ts')
       await writeFile(
         entryFile,
-        `import { runEcho, workerBuild } from './dist/assets/app.js'
-console.log(JSON.stringify({ workerBuild, echo: await runEcho('ping') }))
-process.exit(0)
+        `import { runEcho } from './dist/assets/app.js'
+console.log(await runEcho('ping'))
 `
       )
-      const expected = JSON.stringify({ workerBuild: true, echo: expectedEcho })
-      const run = Bun.spawnSync([process.execPath, entryFile], {
-        env: { ...process.env, NODE_ENV: nodeEnv },
-        stdout: 'pipe',
-        stderr: 'pipe',
-        timeout: 10_000,
-      })
-      expect(run.stderr.toString()).toBe('')
+      const run = await runScript(entryFile, { env: { NODE_ENV: nodeEnv } })
+      expect(run.stderr).toBe('')
       expect(run.exitCode).toBe(0)
-      expect(run.stdout.toString().trim()).toBe(expected)
+      expect(run.stdout).toBe(expectedEcho)
 
       // Match bun-single-compile's root-level worker staging, then remove emitted files.
       const stagedWorker = path.join(directory, path.basename(workerFile))
@@ -89,10 +75,49 @@ process.exit(0)
       })
       expect(compiledRun.stderr.toString()).toBe('')
       expect(compiledRun.exitCode).toBe(0)
-      expect(compiledRun.stdout.toString().trim()).toBe(expected)
+      expect(compiledRun.stdout.toString().trim()).toBe(expectedEcho)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
   },
   30_000
 )
+
+test('the dev server runs workers from source and restarts them after changes', async () => {
+  const directory = await createWorkerApp('vite-dev-', { watched: true })
+  try {
+    const devFile = path.join(directory, 'dev.ts')
+    await writeFile(
+      devFile,
+      `import { createServer } from ${viteModule}
+import { writeFile } from 'node:fs/promises'
+import { bunWorkerPlugin } from ${librarySource('vite-plugin.ts')}
+const server = await createServer({
+  configFile: false,
+  root: ${JSON.stringify(directory)},
+  logLevel: 'silent',
+  server: { middlewareMode: true, ws: false },
+  plugins: [bunWorkerPlugin()],
+})
+const app = await server.ssrLoadModule('/app.ts')
+console.log(await app.runEcho('ping'))
+await writeFile(${JSON.stringify(path.join(directory, 'note.txt'))}, 'edited note')
+const deadline = Date.now() + 5_000
+let edited = ''
+while (Date.now() < deadline) {
+  edited = await app.runEcho('ping')
+  if (edited.endsWith('edited note')) break
+  await Bun.sleep(50)
+}
+console.log(edited)
+await server.close()
+`
+    )
+    const dev = await runScript(devFile)
+    expect(dev.stderr).toBe('')
+    expect(dev.exitCode).toBe(0)
+    expect(dev.stdout.split('\n')).toEqual([expectedEcho, 'ping:packaged asset:edited note'])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+}, 30_000)

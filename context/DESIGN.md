@@ -6,7 +6,9 @@ agri, canola, and dp-inventory each carried copies of the Bun worker plugin and 
 
 ## Consumption
 
-Apps install it with `file:`. With `bun link`, the package resolves its own imports from the global link directory, which can pull in a second copy of `vite` or `nitro`, or give their types as `any`. With `file:`, peers resolve inside each app's store. The catch is that `file:` installs are hard-linked copies, so new files and editors that save by replacing the file don't show up until the app reinstalls. Keep framework packages as peers, never as dependencies.
+Apps install it with `file:`. With `bun link`, the package resolves its own imports from the global link directory, which can pull in a second copy of `vite` or `nitro`, or give their types as `any`. With `file:`, peers resolve inside each app's store. The catch is that `file:` installs are hard-linked copies, so new files and editors that save by replacing the file don't show up until the app runs `bun update bun-worker`; a plain `bun install` doesn't refresh them.
+
+Bun also installs a `file:` package's devDependencies, as it does for a workspace member. A framework listed as a devDependency here therefore installs its own copy into each app, and TypeScript fails to compare the two copies' types (a Vite version mismatch gave "Excessive stack depth comparing types"). Keep frameworks as peers only; Bun installs peers automatically, so the library still gets Vite for its own tests. Nitro is the exception: it stays an optional peer (canola has no Nitro), so it is also a devDependency, pinned to the apps' version. Keep that pin matched to the apps.
 
 ## Environments
 

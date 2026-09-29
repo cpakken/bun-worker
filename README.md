@@ -6,7 +6,7 @@ Runs server code in Bun workers across Vite builds, Nitro's Bun preset, and bun-
 "dependencies": { "bun-worker": "file:../../libraries/bun-worker" }
 ```
 
-Use `file:`, not `bun link`. A linked package resolves its own imports (`vite`, `nitro`) from outside the app. A `file:` install resolves peers from the app. It's a hard-linked copy, though, so after changing the library, reinstall in each app.
+Use `file:`, not `bun link`. A linked package resolves its own imports (`vite`, `nitro`) from outside the app. A `file:` install resolves peers from the app. It's a hard-linked copy, though, so after changing the library, run `bun update bun-worker` in each app (a plain `bun install` doesn't refresh it).
 
 ## Usage
 

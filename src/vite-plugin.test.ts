@@ -23,7 +23,7 @@ await build({
   plugins: [bunWorkerPlugin()],
   build: {
     ssr: 'app.ts', outDir: ${JSON.stringify(outputDirectory)}, emptyOutDir: true, copyPublicDir: false,
-    rolldownOptions: { output: { entryFileNames: 'assets/app.js' } },
+    rolldownOptions: { output: { entryFileNames: 'app.js' } },
   },
 })`
       )
@@ -41,7 +41,7 @@ await build({
       const entryFile = path.join(directory, 'entry.ts')
       await writeFile(
         entryFile,
-        `import { runEcho } from './dist/assets/app.js'
+        `import { runEcho } from './dist/app.js'
 console.log(await runEcho('ping'))
 `
       )
@@ -117,6 +117,37 @@ await server.close()
     expect(dev.stderr).toBe('')
     expect(dev.exitCode).toBe(0)
     expect(dev.stdout.split('\n')).toEqual([expectedEcho, 'ping:packaged asset:edited note'])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test('builds reject worker() calls without a literal module URL', async () => {
+  const directory = await createWorkerApp('vite-dynamic-url-')
+  try {
+    await writeFile(
+      path.join(directory, 'app.ts'),
+      `import { worker } from ${librarySource('index.ts')}
+const moduleUrl = new URL('./echo.worker.ts', import.meta.url)
+export const echoWorker = worker(moduleUrl)
+`
+    )
+    const buildFile = path.join(directory, 'build.ts')
+    await writeFile(
+      buildFile,
+      `import { build } from 'vite'
+import { bunWorkerPlugin } from ${librarySource('vite-plugin.ts')}
+await build({
+  configFile: false,
+  root: ${JSON.stringify(directory)},
+  logLevel: 'silent',
+  plugins: [bunWorkerPlugin()],
+  build: { ssr: 'app.ts', outDir: ${JSON.stringify(path.join(directory, 'dist'))} },
+})`
+    )
+    const build = await runScript(buildFile)
+    expect(build.exitCode).not.toBe(0)
+    expect(build.stderr).toContain("must be called with new URL('./module.ts', import.meta.url)")
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

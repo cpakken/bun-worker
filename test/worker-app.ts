@@ -31,7 +31,7 @@ export async function writeFiles(directory: string, files: Record<string, string
 }
 
 /**
- * Writes an app whose `app.ts` calls a `?bun-worker` module. The worker reads a packaged file
+ * Writes an app whose `app.ts` calls a worker module. The worker reads a packaged file
  * import and a text import, the two asset kinds the apps' PDF workers use.
  */
 export async function createWorkerApp(prefix: string, options: { watched?: boolean } = {}) {
@@ -49,17 +49,21 @@ export async function echo(job: string) {
   return [job, asset, note].join(':')
 }
 `,
-    'app.ts': `import echoWorker from './echo.worker.ts?bun-worker'
+    'app.ts': `import { worker } from ${librarySource('index.ts')}
 
-const worker = echoWorker<typeof import('./echo.worker.ts')>()
-export const runEcho = (job: string) => worker.echo(job)
+// Non-ASCII text before the call — ✓ — checks that the build rewrite uses correct offsets.
+const echoWorker = worker<typeof import('./echo.worker.ts')>(new URL('./echo.worker.ts', import.meta.url))
+export const runEcho = (job: string) => echoWorker.echo(job)
 `,
   })
   return directory
 }
 
 /** Runs a script in a separate Bun process and returns its trimmed output. */
-export async function runScript(file: string, options: { cwd?: string; env?: Record<string, string> } = {}) {
+export async function runScript(
+  file: string,
+  options: { cwd?: string; env?: Record<string, string> } = {}
+) {
   const child = Bun.spawn([process.execPath, file], {
     cwd: options.cwd,
     env: { ...process.env, ...options.env },

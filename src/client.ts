@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { SerializedError, WorkerCall, WorkerReply } from './protocol'
 import { argumentTransfers } from './transfer'
 
@@ -12,19 +15,28 @@ type WorkerClient = {
   restart: () => void
 }
 
-// One client per worker module for the whole process. Vite's dev server reloads the generated
-// module on every change and the plugin runs in a separate module instance, so both look clients
-// up here rather than holding their own.
+// One client per worker module for the whole process. Vite's dev server re-evaluates calling
+// modules after changes and loads this file as more than one module instance, so clients live here.
 const clientsKey: unique symbol = Symbol.for('bun-worker.clients')
 const processState = globalThis as { [clientsKey]?: Map<string, WorkerClient> }
 const clients = (processState[clientsKey] ??= new Map())
 
-/** Called by generated `?bun-worker` modules; returns the call proxy for the named worker. */
-export function workerModule(name: string, createWorker: () => Worker) {
-  let client = clients.get(name)
-  if (!client) clients.set(name, (client = createClient(name, createWorker)))
-  const proxy = client.proxy
-  return () => proxy
+/** Returns the call proxy for a worker, creating its client on first use. */
+export function workerModule(key: string, name: string, createWorker: () => Worker) {
+  let client = clients.get(key)
+  if (!client) clients.set(key, (client = createClient(name, createWorker)))
+  return client.proxy
+}
+
+/**
+ * Locates a built worker. The bundler's path is relative to the calling module, but Nitro and
+ * standalone compilers move the output: they place workers beside the server modules, which
+ * changes the relative path for modules that weren't already there (such as the server entry).
+ */
+export function builtWorkerUrl(relativePath: string, moduleUrl: string) {
+  const bundled = new URL(relativePath, moduleUrl)
+  if (existsSync(fileURLToPath(bundled))) return bundled.href
+  return new URL(path.basename(relativePath), moduleUrl).href
 }
 
 /** Restarts every worker; the dev server calls this when source files change. */

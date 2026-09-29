@@ -69,7 +69,7 @@ serve(() => import('./broken.ts'))
 `,
   })
   const entry = path.join(directory, 'entry.ts')
-  fixture = workerModule('fixture', () => new Worker(entry))() as Fixture
+  fixture = workerModule('fixture', 'fixture', () => new Worker(entry)) as Fixture
 })
 
 afterAll(async () => {
@@ -121,7 +121,7 @@ describe('worker modules', () => {
 
   test('reject each call when the module fails to load', async () => {
     const entry = path.join(directory, 'broken-entry.ts')
-    const broken = workerModule('broken', () => new Worker(entry))() as Fixture
+    const broken = workerModule('broken', 'broken', () => new Worker(entry)) as Fixture
     expect(await rejection(broken.count())).toBe('Module failed to load.')
     expect(await rejection(broken.count())).toBe('Module failed to load.')
   })

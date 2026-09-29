@@ -9,12 +9,11 @@ test('Nitro artifact runs workers outside the repository without installed packa
   const deployment = await mkdtemp(path.join(tmpdir(), 'nitro-worker-deployment-'))
   let server: ReturnType<typeof Bun.spawn> | undefined
   try {
-    // Load the worker client as a chunk, as TanStack Start server functions are. Nitro
-    // flattens chunks into _ssr/, where the hook places the workers.
     await writeFile(
       path.join(source, 'nitro-server.ts'),
-      `export default { async fetch() {
-  const { runEcho } = await import('./app.ts')
+      `import { runEcho } from './app.ts'
+// The worker is called from the server entry, not a chunk: Nitro moves the entry into _ssr/.
+export default { async fetch() {
   return new Response(await runEcho('ping'))
 } }
 `
